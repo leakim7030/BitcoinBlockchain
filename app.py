@@ -16,19 +16,33 @@ def fetch_unconfirmed_transactions():
     data = response.json()
     return data['txs']
 
+def process_whale_transaction(tx):
+    # Assuming the first input and output are representative for simplification
+    from_address = tx['inputs'][0]['prev_out']['addr'] if 'addr' in tx['inputs'][0]['prev_out'] else 'Unknown'
+    to_address = tx['out'][0]['addr'] if 'addr' in tx['out'][0] else 'Unknown'
+    amount_sent = sum(out['value'] for out in tx['out']) / 1e8  # Convert from satoshi to BTC
+    return {'from': from_address, 'to': to_address, 'amount': amount_sent}
+
 def process_and_send_block_data():
     try:
         txs = fetch_unconfirmed_transactions()
+        
+        # Filter and process whale transactions
         whale_transactions = [tx for tx in txs if sum(out['value'] for out in tx['out']) >= WHALE_TRANSACTION_THRESHOLD]
-
-        # Sort whale transactions by total output in descending order and pick top 3
-        top_3_whales = sorted(whale_transactions, key=lambda tx: sum(out['value'] for out in tx['out']), reverse=True)[:3]
-
+        processed_whales = [process_whale_transaction(tx) for tx in whale_transactions]
+        
+        # Sort whale transactions by amount sent, descending
+        sorted_whales = sorted(processed_whales, key=lambda tx: tx['amount'], reverse=True)[:3]
+        
+        # Calculate total output and transaction count
+        total_output_btc = sum(sum(out['value'] for out in tx['out']) for tx in txs) / 1e8
+        transaction_count = len(txs)
+        
         payload = {
             "whale_transactions_count": len(whale_transactions),
-            "number_1_whale_transaction": top_3_whales[0] if len(top_3_whales) > 0 else None,
-            "number_2_whale_transaction": top_3_whales[1] if len(top_3_whales) > 1 else None,
-            "number_3_whale_transaction": top_3_whales[2] if len(top_3_whales) > 2 else None,
+            "transaction_count": transaction_count,
+            "total_output_btc": total_output_btc,
+            "top_whale_transactions": sorted_whales,
         }
         
         headers = {
@@ -38,7 +52,7 @@ def process_and_send_block_data():
 
         response = requests.post(WORDPRESS_API_URL, json=payload, headers=headers)
         response.raise_for_status()
-        print(f"Data sent successfully: {response.json()}")
+        print(f"Data sent successfully: {payload}")
     except requests.RequestException as e:
         print(f"Error fetching or sending data: {e}")
 
