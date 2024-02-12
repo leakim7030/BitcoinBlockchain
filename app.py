@@ -66,7 +66,7 @@ def process_transactions():
     print("Processed transactions...")
     
     # Send data to WordPress
-    headers = {'X-WP-API-KEY': os.getenv('WP_API_KEY'), 'Content-Type': 'application/json'}
+    headers = {'X-WP-API-KEY': os.getenv('BLOCKCHAIN_API_KEY'), 'Content-Type': 'application/json'}
     try:
         print("Sending transactions to database...")
         response = requests.post(WP_API_URL, json=data_payload, headers=headers)
