@@ -1,67 +1,74 @@
 import os
 import requests
+import redis
+import json
 import schedule
 import time
 
+# Initialize Redis
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+
 # Constants
-UNCONFIRMED_TX_API_URL = "https://blockchain.info/unconfirmed-transactions?format=json"
-WHALE_TRANSACTION_THRESHOLD = 10000000  # in satoshi (100 BTC)
-SEND_DATA_INTERVAL = 15  # seconds
-WORDPRESS_API_URL = "https://knudz.com/wp-json/blockchain/v1/data"
-API_KEY = os.getenv('BLOCKCHAIN_API_KEY')
+API_URL = "https://blockchain.info/unconfirmed-transactions?format=json"
+WP_API_URL = "https://knudz.com/wp-json/blockchain/v1/data"
+FETCH_INTERVAL = 10  # Fetch every 10 seconds to adhere to API's limit
+PROCESS_INTERVAL = 15  # Process data every 15 seconds
+WHALE_THRESHOLD = 100 * 10**8  # 100 BTC in Satoshi
 
-def fetch_unconfirmed_transactions():
-    response = requests.get(UNCONFIRMED_TX_API_URL)
-    response.raise_for_status()
-    data = response.json()
-    return data['txs']
-
-def process_whale_transaction(tx):
-    # Assuming the first input and output are representative for simplification
-    from_address = tx['inputs'][0]['prev_out']['addr'] if 'addr' in tx['inputs'][0]['prev_out'] else 'Unknown'
-    to_address = tx['out'][0]['addr'] if 'addr' in tx['out'][0] else 'Unknown'
-    amount_sent = sum(out['value'] for out in tx['out']) / 1e8  # Convert from satoshi to BTC
-    return {'from': from_address, 'to': to_address, 'amount': amount_sent}
-
-def process_and_send_block_data():
+def fetch_transactions():
     try:
-        txs = fetch_unconfirmed_transactions()
-        
-        # Filter and process whale transactions
-        whale_transactions = [tx for tx in txs if sum(out['value'] for out in tx['out']) >= WHALE_TRANSACTION_THRESHOLD]
-        processed_whales = [process_whale_transaction(tx) for tx in whale_transactions]
-        
-        # Sort whale transactions by amount sent, descending
-        sorted_whales = sorted(processed_whales, key=lambda tx: tx['amount'], reverse=True)[:3]
-        
-        # Calculate total output and transaction count
-        total_output_btc = sum(sum(out['value'] for out in tx['out']) for tx in txs) / 1e8
-        transaction_count = len(txs)
-        
-        payload = {
-            "whale_transactions_count": len(whale_transactions),
-            "transaction_count": transaction_count,
-            "total_output_btc": total_output_btc,
-            "top_whale_transactions": sorted_whales,
-        }
-        
-        headers = {
-            'X-WP-API-KEY': API_KEY,
-            'Content-Type': 'application/json'
-        }
-
-        response = requests.post(WORDPRESS_API_URL, json=payload, headers=headers)
+        response = requests.get(API_URL)
         response.raise_for_status()
-        print(f"Data sent successfully: {payload}")
-    except requests.RequestException as e:
-        print(f"Error fetching or sending data: {e}")
+        data = response.json()
+        txs = data.get('txs', [])
+        for tx in txs:
+            tx_hash = tx.get('hash')
+            if tx_hash:  # Store transaction with its hash as key
+                redis_client.set(f"tx:{tx_hash}", json.dumps(tx), ex=120)  # Expire after 2 minutes
+    except Exception as e:
+        print(f"Error fetching transactions: {e}")
 
-schedule.every(SEND_DATA_INTERVAL).seconds.do(process_and_send_block_data)
+def process_transactions():
+    tx_keys = redis_client.keys("tx:*")
+    transactions = [json.loads(redis_client.get(k)) for k in tx_keys]
+    
+    # Calculate total_output_btc and transaction_count
+    total_output_satoshi = sum(sum(out['value'] for out in tx['out']) for tx in transactions)
+    total_output_btc = total_output_satoshi / 10**8  # Convert Satoshi to BTC
+    transaction_count = len(transactions)
+    
+    # Identify top 3 whale transactions
+    whale_transactions = sorted(
+        [tx for tx in transactions if sum(out['value'] for out in tx['out']) >= WHALE_THRESHOLD],
+        key=lambda tx: sum(out['value'] for out in tx['out']),
+        reverse=True
+    )[:3]
+    
+    # Extract necessary details from whale transactions
+    top_whales = [{
+        'from': tx['inputs'][0]['prev_out'].get('addr', 'Unknown'),
+        'to': tx['out'][0].get('addr', 'Unknown'),
+        'amount': sum(out['value'] for out in tx['out']) / 10**8  # Convert Satoshi to BTC
+    } for tx in whale_transactions]
+
+    # Prepare data payload
+    data_payload = {
+        'transaction_count': transaction_count,
+        'total_output_btc': total_output_btc,
+        'top_whale_transactions': top_whales,
+    }
+
+    # Send data to WordPress
+    headers = {'X-WP-API-KEY': os.getenv('WP_API_KEY'), 'Content-Type': 'application/json'}
+    try:
+        response = requests.post(WP_API_URL, json=data_payload, headers=headers)
+        print(f"Data sent to WordPress. Status: {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        print(f"Error sending data to WordPress: {e}")
+
+schedule.every(FETCH_INTERVAL).seconds.do(fetch_transactions)
+schedule.every(PROCESS_INTERVAL).seconds.do(process_transactions)
 
 while True:
-    try:
-        schedule.run_pending()
-        time.sleep(1)
-    except Exception as e:
-        print(f"Scheduling error: {e}")
-        time.sleep(1)
+    schedule.run_pending()
+    time.sleep(1)
