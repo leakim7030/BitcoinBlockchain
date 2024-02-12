@@ -4,10 +4,11 @@ import redis
 import json
 import schedule
 import time
+print("Starting the script...")
 
 # Initialize Redis
 redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-
+print("Redis running...")
 # Constants
 API_URL = "https://blockchain.info/unconfirmed-transactions?format=json"
 WP_API_URL = "https://knudz.com/wp-json/blockchain/v1/data"
@@ -17,6 +18,7 @@ WHALE_THRESHOLD = 100 * 10**8  # 100 BTC in Satoshi
 
 def fetch_transactions():
     try:
+        print("Fetching transactions...")
         response = requests.get(API_URL)
         response.raise_for_status()
         data = response.json()
@@ -25,10 +27,12 @@ def fetch_transactions():
             tx_hash = tx.get('hash')
             if tx_hash:  # Store transaction with its hash as key
                 redis_client.set(f"tx:{tx_hash}", json.dumps(tx), ex=120)  # Expire after 2 minutes
+        print("Fetched transactions...")
     except Exception as e:
         print(f"Error fetching transactions: {e}")
 
 def process_transactions():
+    print("processing transactions...")
     tx_keys = redis_client.keys("tx:*")
     transactions = [json.loads(redis_client.get(k)) for k in tx_keys]
     
@@ -57,10 +61,11 @@ def process_transactions():
         'total_output_btc': total_output_btc,
         'top_whale_transactions': top_whales,
     }
-
+    print("Processed transactions...")
     # Send data to WordPress
     headers = {'X-WP-API-KEY': os.getenv('WP_API_KEY'), 'Content-Type': 'application/json'}
     try:
+        print("Sending transactions to database...")
         response = requests.post(WP_API_URL, json=data_payload, headers=headers)
         print(f"Data sent to WordPress. Status: {response.status_code}, Response: {response.text}")
     except Exception as e:
