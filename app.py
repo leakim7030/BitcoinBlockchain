@@ -1,20 +1,19 @@
 import os
 import requests
-import redis
 import json
 import schedule
 import time
+from collections import deque
+
 print("Starting the script...")
 
-# Initialize Redis
-redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
-print("Redis running...")
 # Constants
 API_URL = "https://blockchain.info/unconfirmed-transactions?format=json"
 WP_API_URL = "https://knudz.com/wp-json/blockchain/v1/data"
-FETCH_INTERVAL = 10  # Fetch every 10 seconds to adhere to API's limit
-PROCESS_INTERVAL = 15  # Process data every 15 seconds
+FETCH_INTERVAL = 10  # seconds
+PROCESS_INTERVAL = 15  # seconds
 WHALE_THRESHOLD = 100 * 10**8  # 100 BTC in Satoshi
+TRANSACTION_HISTORY = deque(maxlen=200)  # Store last 200 transactions
 
 def fetch_transactions():
     try:
@@ -23,18 +22,21 @@ def fetch_transactions():
         response.raise_for_status()
         data = response.json()
         txs = data.get('txs', [])
+        
+        # Add new transactions to the deque, discarding the oldest if at capacity
         for tx in txs:
             tx_hash = tx.get('hash')
-            if tx_hash:  # Store transaction with its hash as key
-                redis_client.set(f"tx:{tx_hash}", json.dumps(tx), ex=120)  # Expire after 2 minutes
-        print("Fetched transactions...")
+            if tx_hash:
+                TRANSACTION_HISTORY.appendleft(tx)
+        
+        print(f"Fetched transactions, {len(TRANSACTION_HISTORY)} in memory.")
     except Exception as e:
         print(f"Error fetching transactions: {e}")
 
 def process_transactions():
-    print("processing transactions...")
-    tx_keys = redis_client.keys("tx:*")
-    transactions = [json.loads(redis_client.get(k)) for k in tx_keys]
+    print("Processing transactions...")
+    # Use transactions from the deque
+    transactions = list(TRANSACTION_HISTORY)
     
     # Calculate total_output_btc and transaction_count
     total_output_satoshi = sum(sum(out['value'] for out in tx['out']) for tx in transactions)
@@ -62,6 +64,7 @@ def process_transactions():
         'top_whale_transactions': top_whales,
     }
     print("Processed transactions...")
+    
     # Send data to WordPress
     headers = {'X-WP-API-KEY': os.getenv('WP_API_KEY'), 'Content-Type': 'application/json'}
     try:
@@ -71,6 +74,7 @@ def process_transactions():
     except Exception as e:
         print(f"Error sending data to WordPress: {e}")
 
+# Schedule tasks
 schedule.every(FETCH_INTERVAL).seconds.do(fetch_transactions)
 schedule.every(PROCESS_INTERVAL).seconds.do(process_transactions)
 
